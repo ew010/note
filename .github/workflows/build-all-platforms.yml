@@ -48,7 +48,7 @@ jobs:
         run: flutter pub get
 
       - name: Build iOS Simulator app (no signing)
-        run: flutter build ios --simulator --release --no-codesign
+        run: flutter build ios --simulator --debug --no-codesign
 
       - name: Package iOS Simulator app
         run: |
