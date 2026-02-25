@@ -63,7 +63,6 @@ jobs:
           if-no-files-found: error
 
   build-ios-device-ipa:
-    if: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 != '' && secrets.IOS_CERTIFICATE_PASSWORD != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != '' && secrets.IOS_TEAM_ID != '' && secrets.IOS_BUNDLE_ID != '' }}
     runs-on: macos-latest
     env:
       IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
@@ -76,15 +75,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check signing secrets
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${IOS_CERTIFICATE_P12_BASE64}" && -n "${IOS_CERTIFICATE_PASSWORD}" && -n "${IOS_PROVISIONING_PROFILE_BASE64}" && -n "${IOS_TEAM_ID}" && -n "${IOS_BUNDLE_ID}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "iOS signing secrets not fully configured. Skipping signed IPA build."
+          fi
+
       - name: Setup Flutter
+        if: steps.signing.outputs.enabled == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
       - name: Install dependencies
+        if: steps.signing.outputs.enabled == 'true'
         run: flutter pub get
 
       - name: Prepare signing files
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +110,7 @@ jobs:
           echo -n "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/note.mobileprovision"
 
       - name: Import certificate to keychain
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -108,12 +123,14 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$HOME/Library/Keychains/build.keychain-db"
 
       - name: Apply bundle id and team id
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
           perl -0pi -e "s/PRODUCT_BUNDLE_IDENTIFIER = com\\.example\\.note;/PRODUCT_BUNDLE_IDENTIFIER = ${IOS_BUNDLE_ID};\\n\\t\\t\\t\\tDEVELOPMENT_TEAM = ${IOS_TEAM_ID};/g" ios/Runner.xcodeproj/project.pbxproj
 
       - name: Build signed IPA
+        if: steps.signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -121,6 +138,7 @@ jobs:
           flutter build ipa --release --export-method "$METHOD"
 
       - name: Upload signed iOS IPA artifact
+        if: steps.signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: note-ios-ipa-signed
