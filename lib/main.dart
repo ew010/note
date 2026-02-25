@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -16,7 +15,7 @@ class NotesApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Notion Lite',
+      title: 'Notion Lite Local',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3B3B3B)),
         useMaterial3: true,
@@ -70,27 +69,23 @@ class NotesHomePage extends StatefulWidget {
 }
 
 class _NotesHomePageState extends State<NotesHomePage> {
-  static const _storageKey = 'notion_lite_pages_v2';
-  static const _syncTokenKey = 'notion_lite_github_token_v1';
-  static const _syncGistIdKey = 'notion_lite_github_gist_id_v1';
-  static const _cloudFileName = 'notion_lite_backup.json';
+  static const _storageKey = 'notion_lite_local_pages_v3';
 
   final _titleController = TextEditingController();
   final _contentController = TextEditingController();
   final _searchController = TextEditingController();
-
   final List<NotePage> _pages = [];
 
   String? _selectedPageId;
   bool _isLoading = true;
   bool _isHydratingEditor = false;
   bool _isPreviewMode = false;
+  int _mobileTabIndex = 0;
 
   NotePage? get _selectedPage {
     if (_pages.isEmpty) {
       return null;
     }
-
     final current = _pages.where((p) => p.id == _selectedPageId).firstOrNull;
     return current ?? _visiblePages.firstOrNull;
   }
@@ -111,7 +106,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
       }
       return b.updatedAt.compareTo(a.updatedAt);
     });
-
     return filtered;
   }
 
@@ -142,7 +136,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
           id: DateTime.now().microsecondsSinceEpoch.toString(),
           title: 'Welcome',
           content:
-              '# Notion Lite\n\n- Use sidebar search\n- Pin important pages\n- Toggle Preview mode\n- Export and import JSON',
+              '# Local Note\n\nThis version is fully local and offline-first.',
           updatedAt: DateTime.now(),
           isFavorite: true,
         ),
@@ -178,229 +172,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
     );
   }
 
-  Future<(String?, String?)> _loadSyncConfig() async {
-    final prefs = await SharedPreferences.getInstance();
-    return (prefs.getString(_syncTokenKey), prefs.getString(_syncGistIdKey));
-  }
-
-  Future<void> _saveSyncConfig(String token, String gistId) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_syncTokenKey, token.trim());
-    if (gistId.trim().isEmpty) {
-      await prefs.remove(_syncGistIdKey);
-    } else {
-      await prefs.setString(_syncGistIdKey, gistId.trim());
-    }
-  }
-
-  String _notesAsJson() {
-    return jsonEncode(_pages.map((p) => p.toJson()).toList());
-  }
-
-  Map<String, String> _githubHeaders(String token) {
-    return {
-      'Authorization': 'Bearer $token',
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json',
-    };
-  }
-
-  Future<void> _openSyncSetup() async {
-    final (savedToken, savedGistId) = await _loadSyncConfig();
-    final tokenController = TextEditingController(text: savedToken ?? '');
-    final gistController = TextEditingController(text: savedGistId ?? '');
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Cloud Sync Setup (GitHub Gist)'),
-          content: SizedBox(
-            width: 560,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'Use a GitHub fine-grained token with Gists write/read permission.',
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: tokenController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'GitHub Token',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: gistController,
-                  decoration: const InputDecoration(
-                    labelText: 'Gist ID (optional first time)',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Save'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (saved != true) {
-      return;
-    }
-
-    if (tokenController.text.trim().isEmpty) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Token is required')));
-      return;
-    }
-
-    await _saveSyncConfig(tokenController.text, gistController.text);
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Sync config saved')));
-  }
-
-  Future<void> _cloudPush() async {
-    final (token, gistId) = await _loadSyncConfig();
-    if (token == null || token.trim().isEmpty) {
-      await _openSyncSetup();
-      return;
-    }
-
-    final headers = _githubHeaders(token.trim());
-    final payload = {
-      'files': {
-        _cloudFileName: {'content': _notesAsJson()},
-      },
-    };
-
-    String? nextGistId = gistId?.trim();
-    http.Response response;
-
-    if (nextGistId == null || nextGistId.isEmpty) {
-      response = await http.post(
-        Uri.parse('https://api.github.com/gists'),
-        headers: headers,
-        body: jsonEncode({
-          'description': 'Notion Lite backup',
-          'public': false,
-          ...payload,
-        }),
-      );
-      if (response.statusCode != 201) {
-        throw Exception('Create gist failed (${response.statusCode})');
-      }
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
-      nextGistId = body['id'] as String?;
-      if (nextGistId == null || nextGistId.isEmpty) {
-        throw Exception('Create gist succeeded but no gist id returned');
-      }
-      await _saveSyncConfig(token, nextGistId);
-    } else {
-      response = await http.patch(
-        Uri.parse('https://api.github.com/gists/$nextGistId'),
-        headers: headers,
-        body: jsonEncode(payload),
-      );
-      if (response.statusCode != 200) {
-        throw Exception('Update gist failed (${response.statusCode})');
-      }
-    }
-
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Cloud push success (Gist: $nextGistId)')),
-    );
-  }
-
-  Future<void> _cloudPull() async {
-    final (token, gistId) = await _loadSyncConfig();
-    if (token == null ||
-        token.trim().isEmpty ||
-        gistId == null ||
-        gistId.trim().isEmpty) {
-      await _openSyncSetup();
-      return;
-    }
-
-    final headers = _githubHeaders(token.trim());
-    final response = await http.get(
-      Uri.parse('https://api.github.com/gists/${gistId.trim()}'),
-      headers: headers,
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Fetch gist failed (${response.statusCode})');
-    }
-
-    final gist = jsonDecode(response.body) as Map<String, dynamic>;
-    final files = gist['files'] as Map<String, dynamic>? ?? {};
-    final file = files[_cloudFileName] as Map<String, dynamic>?;
-    if (file == null) {
-      throw Exception('Backup file not found in gist');
-    }
-
-    String? content = file['content'] as String?;
-    final rawUrl = file['raw_url'] as String?;
-    if ((content == null || content.isEmpty) &&
-        rawUrl != null &&
-        rawUrl.isNotEmpty) {
-      final rawResponse = await http.get(Uri.parse(rawUrl), headers: headers);
-      if (rawResponse.statusCode == 200) {
-        content = rawResponse.body;
-      }
-    }
-
-    if (content == null || content.isEmpty) {
-      throw Exception('Backup content is empty');
-    }
-
-    final decoded = jsonDecode(content) as List<dynamic>;
-    final pages = decoded
-        .map((item) => NotePage.fromJson(item as Map<String, dynamic>))
-        .toList();
-    if (pages.isEmpty) {
-      throw Exception('Backup has no pages');
-    }
-
-    setState(() {
-      _pages
-        ..clear()
-        ..addAll(pages);
-      _selectedPageId = _visiblePages.firstOrNull?.id;
-    });
-    _syncEditorFromSelected();
-    await _savePages();
-
-    if (!mounted) {
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Cloud pull success (${pages.length} pages)')),
-    );
-  }
-
   void _syncEditorFromSelected() {
     final page = _selectedPage;
     _isHydratingEditor = true;
@@ -419,22 +190,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return;
     }
 
-    final stillVisible = visible.any((p) => p.id == _selectedPageId);
-    if (!stillVisible) {
+    if (!visible.any((p) => p.id == _selectedPageId)) {
       setState(() {
         _selectedPageId = visible.first.id;
       });
       _syncEditorFromSelected();
-    } else {
-      setState(() {});
+      return;
     }
+
+    setState(() {});
   }
 
   void _onEditorChanged() {
     if (_isHydratingEditor) {
       return;
     }
-
     final page = _selectedPage;
     if (page == null) {
       return;
@@ -443,14 +213,12 @@ class _NotesHomePageState extends State<NotesHomePage> {
     final nextTitle = _titleController.text.trim().isEmpty
         ? 'Untitled'
         : _titleController.text.trim();
-
     setState(() {
       page.title = nextTitle;
       page.content = _contentController.text;
       page.updatedAt = DateTime.now();
       _selectedPageId = page.id;
     });
-
     _savePages();
   }
 
@@ -467,6 +235,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
       _pages.insert(0, page);
       _selectedPageId = page.id;
       _searchController.clear();
+      _mobileTabIndex = 1;
     });
 
     _syncEditorFromSelected();
@@ -509,9 +278,9 @@ class _NotesHomePageState extends State<NotesHomePage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('All notes copied as JSON')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Local backup JSON copied to clipboard')),
+    );
   }
 
   Future<void> _importFromJson() async {
@@ -520,14 +289,14 @@ class _NotesHomePageState extends State<NotesHomePage> {
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('Import JSON'),
+          title: const Text('Import Local Backup JSON'),
           content: SizedBox(
             width: 520,
             child: TextField(
               controller: inputController,
               maxLines: 12,
               decoration: const InputDecoration(
-                hintText: 'Paste JSON exported from this app',
+                hintText: 'Paste backup JSON',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -590,25 +359,10 @@ class _NotesHomePageState extends State<NotesHomePage> {
     final end = selection.end < 0 ? value.text.length : selection.end;
 
     final newText = value.text.replaceRange(start, end, text);
-    final newOffset = start + text.length;
-
     _contentController.value = TextEditingValue(
       text: newText,
-      selection: TextSelection.collapsed(offset: newOffset),
+      selection: TextSelection.collapsed(offset: start + text.length),
     );
-  }
-
-  Future<void> _runCloudTask(Future<void> Function() task) async {
-    try {
-      await task();
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Cloud sync failed: $e')));
-    }
   }
 
   @override
@@ -617,32 +371,72 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isMobile = constraints.maxWidth < 900;
+        if (isMobile) {
+          return _buildMobileLayout(context);
+        }
+        return _buildDesktopLayout(context);
+      },
+    );
+  }
+
+  Widget _buildMobileLayout(BuildContext context) {
     final selected = _selectedPage;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Notion Lite'),
+        title: const Text('Notion Lite Local'),
         actions: [
           IconButton(
-            tooltip: 'Sync setup',
-            onPressed: _openSyncSetup,
-            icon: const Icon(Icons.settings_backup_restore_outlined),
+            tooltip: 'New page',
+            onPressed: _createPage,
+            icon: const Icon(Icons.note_add_outlined),
           ),
           IconButton(
-            tooltip: 'Cloud pull',
-            onPressed: () => _runCloudTask(_cloudPull),
-            icon: const Icon(Icons.cloud_download_outlined),
+            tooltip: 'Backup JSON',
+            onPressed: _copyAllAsJson,
+            icon: const Icon(Icons.upload_file_outlined),
           ),
           IconButton(
-            tooltip: 'Cloud push',
-            onPressed: () => _runCloudTask(_cloudPush),
-            icon: const Icon(Icons.cloud_upload_outlined),
+            tooltip: 'Restore JSON',
+            onPressed: _importFromJson,
+            icon: const Icon(Icons.download_outlined),
           ),
-          IconButton(
-            tooltip: 'Search',
-            onPressed: () => FocusScope.of(context).requestFocus(FocusNode()),
-            icon: const Icon(Icons.search),
+        ],
+      ),
+      body: _mobileTabIndex == 0
+          ? _buildPagesPane(compact: true)
+          : _buildEditorPane(selected, compact: true),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _mobileTabIndex,
+        onDestinationSelected: (index) {
+          setState(() {
+            _mobileTabIndex = index;
+          });
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.list_alt_outlined),
+            label: 'Pages',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.edit_note_outlined),
+            label: 'Editor',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDesktopLayout(BuildContext context) {
+    final selected = _selectedPage;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Notion Lite Local'),
+        actions: [
           IconButton(
             tooltip: 'Preview',
             onPressed: () {
@@ -657,12 +451,12 @@ class _NotesHomePageState extends State<NotesHomePage> {
             ),
           ),
           IconButton(
-            tooltip: 'Export JSON',
+            tooltip: 'Backup JSON',
             onPressed: _copyAllAsJson,
             icon: const Icon(Icons.upload_file_outlined),
           ),
           IconButton(
-            tooltip: 'Import JSON',
+            tooltip: 'Restore JSON',
             onPressed: _importFromJson,
             icon: const Icon(Icons.download_outlined),
           ),
@@ -680,176 +474,200 @@ class _NotesHomePageState extends State<NotesHomePage> {
       ),
       body: Row(
         children: [
-          Container(
-            width: 310,
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerLowest,
-              border: Border(
-                right: BorderSide(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                ),
-              ),
-            ),
+          SizedBox(width: 320, child: _buildPagesPane(compact: false)),
+          Expanded(child: _buildEditorPane(selected, compact: false)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPagesPane({required bool compact}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLowest,
+        border: Border(
+          right: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
             child: Column(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              'Pages',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Create page',
-                            onPressed: _createPage,
-                            icon: const Icon(Icons.add),
-                          ),
-                        ],
-                      ),
-                      TextField(
-                        controller: _searchController,
-                        decoration: const InputDecoration(
-                          hintText: 'Search pages...',
-                          prefixIcon: Icon(Icons.search),
-                          isDense: true,
-                          border: OutlineInputBorder(),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Pages',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                    IconButton(
+                      tooltip: 'Create page',
+                      onPressed: _createPage,
+                      icon: const Icon(Icons.add),
+                    ),
+                  ],
                 ),
-                const Divider(height: 1),
-                Expanded(
-                  child: _visiblePages.isEmpty
-                      ? const Center(child: Text('No matching pages'))
-                      : ListView.builder(
-                          itemCount: _visiblePages.length,
-                          itemBuilder: (context, index) {
-                            final page = _visiblePages[index];
-                            final isSelected = page.id == _selectedPageId;
-                            return ListTile(
-                              selected: isSelected,
-                              leading: Icon(
-                                page.isFavorite
-                                    ? Icons.star_rounded
-                                    : Icons.description_outlined,
-                                color: page.isFavorite
-                                    ? Colors.amber.shade700
-                                    : null,
-                              ),
-                              title: Text(
-                                page.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: Text(
-                                _formatTime(page.updatedAt),
-                                maxLines: 1,
-                              ),
-                              onTap: () {
-                                setState(() {
-                                  _selectedPageId = page.id;
-                                });
-                                _syncEditorFromSelected();
-                              },
-                            );
-                          },
-                        ),
+                TextField(
+                  controller: _searchController,
+                  decoration: const InputDecoration(
+                    hintText: 'Search pages...',
+                    prefixIcon: Icon(Icons.search),
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
                 ),
               ],
             ),
           ),
+          const Divider(height: 1),
           Expanded(
-            child: selected == null
-                ? const Center(child: Text('No page selected'))
-                : Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _titleController,
-                                style: const TextStyle(
-                                  fontSize: 34,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                decoration: const InputDecoration(
-                                  hintText: 'Untitled',
-                                  border: InputBorder.none,
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: selected.isFavorite ? 'Unpin' : 'Pin',
-                              onPressed: _toggleFavorite,
-                              icon: Icon(
-                                selected.isFavorite
-                                    ? Icons.star_rounded
-                                    : Icons.star_outline_rounded,
-                                color: selected.isFavorite
-                                    ? Colors.amber.shade700
-                                    : null,
-                              ),
-                            ),
-                          ],
+            child: _visiblePages.isEmpty
+                ? const Center(child: Text('No matching pages'))
+                : ListView.builder(
+                    itemCount: _visiblePages.length,
+                    itemBuilder: (context, index) {
+                      final page = _visiblePages[index];
+                      final isSelected = page.id == _selectedPageId;
+                      return ListTile(
+                        selected: isSelected,
+                        leading: Icon(
+                          page.isFavorite
+                              ? Icons.star_rounded
+                              : Icons.description_outlined,
+                          color: page.isFavorite ? Colors.amber.shade700 : null,
                         ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            ActionChip(
-                              label: const Text('H1'),
-                              onPressed: () => _insertAtCursor('\n# Heading\n'),
-                            ),
-                            ActionChip(
-                              label: const Text('H2'),
-                              onPressed: () =>
-                                  _insertAtCursor('\n## Subheading\n'),
-                            ),
-                            ActionChip(
-                              label: const Text('Todo'),
-                              onPressed: () =>
-                                  _insertAtCursor('\n- [ ] Task\n'),
-                            ),
-                            ActionChip(
-                              label: const Text('Code'),
-                              onPressed: () =>
-                                  _insertAtCursor('\n```\ncode\n```\n'),
-                            ),
-                          ],
+                        title: Text(
+                          page.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(height: 8),
-                        Expanded(
-                          child: _isPreviewMode
-                              ? _MarkdownPreview(
-                                  content: _contentController.text,
-                                )
-                              : TextField(
-                                  controller: _contentController,
-                                  expands: true,
-                                  maxLines: null,
-                                  minLines: null,
-                                  keyboardType: TextInputType.multiline,
-                                  textAlignVertical: TextAlignVertical.top,
-                                  decoration: const InputDecoration(
-                                    hintText:
-                                        'Type markdown, use chips for quick insert',
-                                    border: InputBorder.none,
-                                  ),
-                                ),
+                        subtitle: Text(
+                          _formatTime(page.updatedAt),
+                          maxLines: 1,
                         ),
-                      ],
+                        onTap: () {
+                          setState(() {
+                            _selectedPageId = page.id;
+                            if (compact) {
+                              _mobileTabIndex = 1;
+                            }
+                          });
+                          _syncEditorFromSelected();
+                        },
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEditorPane(NotePage? selected, {required bool compact}) {
+    if (selected == null) {
+      return const Center(child: Text('No page selected'));
+    }
+
+    return Padding(
+      padding: EdgeInsets.all(compact ? 12 : 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _titleController,
+                  style: TextStyle(
+                    fontSize: compact ? 26 : 34,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  decoration: const InputDecoration(
+                    hintText: 'Untitled',
+                    border: InputBorder.none,
+                  ),
+                ),
+              ),
+              if (compact)
+                IconButton(
+                  tooltip: 'Back to pages',
+                  onPressed: () {
+                    setState(() {
+                      _mobileTabIndex = 0;
+                    });
+                  },
+                  icon: const Icon(Icons.list_alt_outlined),
+                ),
+              IconButton(
+                tooltip: selected.isFavorite ? 'Unpin' : 'Pin',
+                onPressed: _toggleFavorite,
+                icon: Icon(
+                  selected.isFavorite
+                      ? Icons.star_rounded
+                      : Icons.star_outline_rounded,
+                  color: selected.isFavorite ? Colors.amber.shade700 : null,
+                ),
+              ),
+              if (compact)
+                IconButton(
+                  tooltip: 'Delete page',
+                  onPressed: _pages.length > 1 ? _deleteSelectedPage : null,
+                  icon: const Icon(Icons.delete_outline),
+                ),
+            ],
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ActionChip(
+                label: const Text('Preview'),
+                onPressed: () {
+                  setState(() {
+                    _isPreviewMode = !_isPreviewMode;
+                  });
+                },
+              ),
+              ActionChip(
+                label: const Text('H1'),
+                onPressed: () => _insertAtCursor('\n# Heading\n'),
+              ),
+              ActionChip(
+                label: const Text('H2'),
+                onPressed: () => _insertAtCursor('\n## Subheading\n'),
+              ),
+              ActionChip(
+                label: const Text('Todo'),
+                onPressed: () => _insertAtCursor('\n- [ ] Task\n'),
+              ),
+              ActionChip(
+                label: const Text('Code'),
+                onPressed: () => _insertAtCursor('\n```\ncode\n```\n'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: _isPreviewMode
+                ? _MarkdownPreview(content: _contentController.text)
+                : TextField(
+                    controller: _contentController,
+                    expands: true,
+                    maxLines: null,
+                    minLines: null,
+                    keyboardType: TextInputType.multiline,
+                    textAlignVertical: TextAlignVertical.top,
+                    decoration: const InputDecoration(
+                      hintText: 'Write your local notes here...',
+                      border: InputBorder.none,
                     ),
                   ),
           ),
@@ -861,9 +679,9 @@ class _NotesHomePageState extends State<NotesHomePage> {
   String _formatTime(DateTime time) {
     final now = DateTime.now();
     if (now.difference(time).inDays == 0) {
-      final hour = time.hour.toString().padLeft(2, '0');
-      final minute = time.minute.toString().padLeft(2, '0');
-      return 'Today $hour:$minute';
+      final h = time.hour.toString().padLeft(2, '0');
+      final m = time.minute.toString().padLeft(2, '0');
+      return 'Today $h:$m';
     }
     return '${time.year}-${time.month.toString().padLeft(2, '0')}-${time.day.toString().padLeft(2, '0')}';
   }
@@ -877,10 +695,6 @@ class _MarkdownPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final lines = content.split('\n');
-    if (lines.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
     return ListView.separated(
       itemCount: lines.length,
       separatorBuilder: (_, _) => const SizedBox(height: 6),
@@ -939,18 +753,6 @@ class _MarkdownPreview extends StatelessWidget {
             ],
           );
         }
-        if (line.trim().startsWith('```')) {
-          return Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(line.trim()),
-          );
-        }
-
         return Text(line);
       },
     );
