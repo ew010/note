@@ -1,0 +1,127 @@
+name: Build Offline Apps (All Platforms)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build macOS app
+        run: flutter build macos --release
+
+      - name: Package macOS app
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/note.app dist/note-macos.zip
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-macos-offline
+          path: dist/note-macos.zip
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Windows app
+        run: flutter build windows --release
+
+      - name: Package Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath dist/note-windows.zip -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-windows-offline
+          path: dist/note-windows.zip
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Linux app
+        run: flutter build linux --release
+
+      - name: Package Linux app
+        run: |
+          mkdir -p dist
+          tar -C build/linux/x64/release -czf dist/note-linux.tar.gz bundle
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-linux-offline
+          path: dist/note-linux.tar.gz
+          if-no-files-found: error
+
+  build-web-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Web app
+        run: flutter build web --release
+
+      - name: Package Web bundle
+        run: |
+          mkdir -p dist
+          tar -C build -czf dist/note-web.tar.gz web
+
+      - name: Upload Web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-web-offline
+          path: dist/note-web.tar.gz
+          if-no-files-found: error
