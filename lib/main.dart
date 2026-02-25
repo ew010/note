@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -70,6 +71,9 @@ class NotesHomePage extends StatefulWidget {
 
 class _NotesHomePageState extends State<NotesHomePage> {
   static const _storageKey = 'notion_lite_pages_v2';
+  static const _syncTokenKey = 'notion_lite_github_token_v1';
+  static const _syncGistIdKey = 'notion_lite_github_gist_id_v1';
+  static const _cloudFileName = 'notion_lite_backup.json';
 
   final _titleController = TextEditingController();
   final _contentController = TextEditingController();
@@ -171,6 +175,229 @@ class _NotesHomePageState extends State<NotesHomePage> {
     await prefs.setString(
       _storageKey,
       jsonEncode(_pages.map((p) => p.toJson()).toList()),
+    );
+  }
+
+  Future<(String?, String?)> _loadSyncConfig() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getString(_syncTokenKey), prefs.getString(_syncGistIdKey));
+  }
+
+  Future<void> _saveSyncConfig(String token, String gistId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_syncTokenKey, token.trim());
+    if (gistId.trim().isEmpty) {
+      await prefs.remove(_syncGistIdKey);
+    } else {
+      await prefs.setString(_syncGistIdKey, gistId.trim());
+    }
+  }
+
+  String _notesAsJson() {
+    return jsonEncode(_pages.map((p) => p.toJson()).toList());
+  }
+
+  Map<String, String> _githubHeaders(String token) {
+    return {
+      'Authorization': 'Bearer $token',
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    };
+  }
+
+  Future<void> _openSyncSetup() async {
+    final (savedToken, savedGistId) = await _loadSyncConfig();
+    final tokenController = TextEditingController(text: savedToken ?? '');
+    final gistController = TextEditingController(text: savedGistId ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Cloud Sync Setup (GitHub Gist)'),
+          content: SizedBox(
+            width: 560,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Use a GitHub fine-grained token with Gists write/read permission.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tokenController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'GitHub Token',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: gistController,
+                  decoration: const InputDecoration(
+                    labelText: 'Gist ID (optional first time)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (saved != true) {
+      return;
+    }
+
+    if (tokenController.text.trim().isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Token is required')));
+      return;
+    }
+
+    await _saveSyncConfig(tokenController.text, gistController.text);
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Sync config saved')));
+  }
+
+  Future<void> _cloudPush() async {
+    final (token, gistId) = await _loadSyncConfig();
+    if (token == null || token.trim().isEmpty) {
+      await _openSyncSetup();
+      return;
+    }
+
+    final headers = _githubHeaders(token.trim());
+    final payload = {
+      'files': {
+        _cloudFileName: {'content': _notesAsJson()},
+      },
+    };
+
+    String? nextGistId = gistId?.trim();
+    http.Response response;
+
+    if (nextGistId == null || nextGistId.isEmpty) {
+      response = await http.post(
+        Uri.parse('https://api.github.com/gists'),
+        headers: headers,
+        body: jsonEncode({
+          'description': 'Notion Lite backup',
+          'public': false,
+          ...payload,
+        }),
+      );
+      if (response.statusCode != 201) {
+        throw Exception('Create gist failed (${response.statusCode})');
+      }
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      nextGistId = body['id'] as String?;
+      if (nextGistId == null || nextGistId.isEmpty) {
+        throw Exception('Create gist succeeded but no gist id returned');
+      }
+      await _saveSyncConfig(token, nextGistId);
+    } else {
+      response = await http.patch(
+        Uri.parse('https://api.github.com/gists/$nextGistId'),
+        headers: headers,
+        body: jsonEncode(payload),
+      );
+      if (response.statusCode != 200) {
+        throw Exception('Update gist failed (${response.statusCode})');
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Cloud push success (Gist: $nextGistId)')),
+    );
+  }
+
+  Future<void> _cloudPull() async {
+    final (token, gistId) = await _loadSyncConfig();
+    if (token == null ||
+        token.trim().isEmpty ||
+        gistId == null ||
+        gistId.trim().isEmpty) {
+      await _openSyncSetup();
+      return;
+    }
+
+    final headers = _githubHeaders(token.trim());
+    final response = await http.get(
+      Uri.parse('https://api.github.com/gists/${gistId.trim()}'),
+      headers: headers,
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Fetch gist failed (${response.statusCode})');
+    }
+
+    final gist = jsonDecode(response.body) as Map<String, dynamic>;
+    final files = gist['files'] as Map<String, dynamic>? ?? {};
+    final file = files[_cloudFileName] as Map<String, dynamic>?;
+    if (file == null) {
+      throw Exception('Backup file not found in gist');
+    }
+
+    String? content = file['content'] as String?;
+    final rawUrl = file['raw_url'] as String?;
+    if ((content == null || content.isEmpty) &&
+        rawUrl != null &&
+        rawUrl.isNotEmpty) {
+      final rawResponse = await http.get(Uri.parse(rawUrl), headers: headers);
+      if (rawResponse.statusCode == 200) {
+        content = rawResponse.body;
+      }
+    }
+
+    if (content == null || content.isEmpty) {
+      throw Exception('Backup content is empty');
+    }
+
+    final decoded = jsonDecode(content) as List<dynamic>;
+    final pages = decoded
+        .map((item) => NotePage.fromJson(item as Map<String, dynamic>))
+        .toList();
+    if (pages.isEmpty) {
+      throw Exception('Backup has no pages');
+    }
+
+    setState(() {
+      _pages
+        ..clear()
+        ..addAll(pages);
+      _selectedPageId = _visiblePages.firstOrNull?.id;
+    });
+    _syncEditorFromSelected();
+    await _savePages();
+
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Cloud pull success (${pages.length} pages)')),
     );
   }
 
@@ -371,6 +598,19 @@ class _NotesHomePageState extends State<NotesHomePage> {
     );
   }
 
+  Future<void> _runCloudTask(Future<void> Function() task) async {
+    try {
+      await task();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Cloud sync failed: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -383,6 +623,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
       appBar: AppBar(
         title: const Text('Notion Lite'),
         actions: [
+          IconButton(
+            tooltip: 'Sync setup',
+            onPressed: _openSyncSetup,
+            icon: const Icon(Icons.settings_backup_restore_outlined),
+          ),
+          IconButton(
+            tooltip: 'Cloud pull',
+            onPressed: () => _runCloudTask(_cloudPull),
+            icon: const Icon(Icons.cloud_download_outlined),
+          ),
+          IconButton(
+            tooltip: 'Cloud push',
+            onPressed: () => _runCloudTask(_cloudPush),
+            icon: const Icon(Icons.cloud_upload_outlined),
+          ),
           IconButton(
             tooltip: 'Search',
             onPressed: () => FocusScope.of(context).requestFocus(FocusNode()),
