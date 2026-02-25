@@ -9,6 +9,59 @@ permissions:
   contents: read
 
 jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android APK
+        run: flutter build apk --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  build-ios-simulator:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build iOS Simulator app (no signing)
+        run: flutter build ios --simulator --release --no-codesign
+
+      - name: Package iOS Simulator app
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/ios/iphonesimulator/Runner.app dist/note-ios-simulator.zip
+
+      - name: Upload iOS simulator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-ios-simulator
+          path: dist/note-ios-simulator.zip
+          if-no-files-found: error
+
   build-macos:
     runs-on: macos-latest
     steps:
