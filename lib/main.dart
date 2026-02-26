@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -25,7 +26,9 @@ class NotesApp extends StatelessWidget {
   }
 }
 
-enum BlockType { paragraph, heading, todo }
+enum BlockType { paragraph, heading, todo, code }
+
+enum BlockTone { normal, red, orange, green, blue, purple }
 
 class NoteBlock {
   NoteBlock({
@@ -33,18 +36,21 @@ class NoteBlock {
     required this.type,
     required this.text,
     this.checked = false,
+    this.tone = BlockTone.normal,
   });
 
   final String id;
   BlockType type;
   String text;
   bool checked;
+  BlockTone tone;
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'type': type.name,
     'text': text,
     'checked': checked,
+    'tone': tone.name,
   };
 
   static NoteBlock fromJson(Map<String, dynamic> json) {
@@ -53,6 +59,11 @@ class NoteBlock {
       (item) => item.name == typeStr,
       orElse: () => BlockType.paragraph,
     );
+    final toneStr = json['tone'] as String? ?? 'normal';
+    final tone = BlockTone.values.firstWhere(
+      (item) => item.name == toneStr,
+      orElse: () => BlockTone.normal,
+    );
     return NoteBlock(
       id:
           json['id'] as String? ??
@@ -60,6 +71,7 @@ class NoteBlock {
       type: type,
       text: json['text'] as String? ?? '',
       checked: json['checked'] as bool? ?? false,
+      tone: tone,
     );
   }
 }
@@ -163,6 +175,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
   bool _isLoading = true;
   bool _isHydratingTitle = false;
   int _mobileTabIndex = 0;
+  bool _isMarkdownPreview = false;
 
   final Map<String, TextEditingController> _blockControllers = {};
   final Map<String, FocusNode> _blockFocusNodes = {};
@@ -689,6 +702,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
       if (type != BlockType.todo) {
         block.checked = false;
       }
+      if (type == BlockType.code && block.tone == BlockTone.normal) {
+        block.tone = BlockTone.blue;
+      }
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+  }
+
+  Future<void> _changeBlockTone(NoteBlock block, BlockTone tone) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+    setState(() {
+      block.tone = tone;
       page.updatedAt = DateTime.now();
     });
     await _savePages();
@@ -733,6 +761,11 @@ class _NotesHomePageState extends State<NotesHomePage> {
                 title: const Text('Todo'),
                 onTap: () => Navigator.pop(context, BlockType.todo),
               ),
+              ListTile(
+                leading: const Icon(Icons.code),
+                title: const Text('Code'),
+                onTap: () => Navigator.pop(context, BlockType.code),
+              ),
             ],
           ),
         );
@@ -767,6 +800,19 @@ class _NotesHomePageState extends State<NotesHomePage> {
       appBar: AppBar(
         title: const Text('Notion Lite Local'),
         actions: [
+          IconButton(
+            tooltip: _isMarkdownPreview ? 'Edit mode' : 'Markdown preview',
+            onPressed: () {
+              setState(() {
+                _isMarkdownPreview = !_isMarkdownPreview;
+              });
+            },
+            icon: Icon(
+              _isMarkdownPreview
+                  ? Icons.edit_note_outlined
+                  : Icons.visibility_outlined,
+            ),
+          ),
           IconButton(
             tooltip: 'New page',
             onPressed: _createPage,
@@ -827,6 +873,19 @@ class _NotesHomePageState extends State<NotesHomePage> {
       appBar: AppBar(
         title: const Text('Notion Lite Local'),
         actions: [
+          IconButton(
+            tooltip: _isMarkdownPreview ? 'Edit mode' : 'Markdown preview',
+            onPressed: () {
+              setState(() {
+                _isMarkdownPreview = !_isMarkdownPreview;
+              });
+            },
+            icon: Icon(
+              _isMarkdownPreview
+                  ? Icons.edit_note_outlined
+                  : Icons.visibility_outlined,
+            ),
+          ),
           IconButton(
             tooltip: 'Backup JSON',
             onPressed: _copyAllAsJson,
@@ -1044,34 +1103,89 @@ class _NotesHomePageState extends State<NotesHomePage> {
           ),
           const SizedBox(height: 8),
           Expanded(
-            child: ReorderableListView.builder(
-              onReorder: _reorderBlocks,
-              itemCount: selected.blocks.length,
-              itemBuilder: (context, index) {
-                final block = selected.blocks[index];
-                return _BlockRow(
-                  key: ValueKey(block.id),
-                  block: block,
-                  controller: _controllerForBlock(block),
-                  focusNode: _focusForBlock(block),
-                  onChanged: (value) async {
-                    if (value == '/' && block.text.isEmpty) {
-                      await _handleSlash(block);
-                      return;
-                    }
-                    await _updateBlockText(block, value);
-                  },
-                  onToggleTodo: (value) => _toggleTodo(block, value),
-                  onDelete: () => _deleteBlock(block),
-                  onSlashCommand: () => _handleSlash(block),
-                  onInsertBelow: () => _addBlock(at: index + 1),
-                );
-              },
-            ),
+            child: _isMarkdownPreview
+                ? Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerLowest,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Markdown(
+                      data: _pageToMarkdown(selected),
+                      selectable: true,
+                    ),
+                  )
+                : ReorderableListView.builder(
+                    onReorder: _reorderBlocks,
+                    itemCount: selected.blocks.length,
+                    itemBuilder: (context, index) {
+                      final block = selected.blocks[index];
+                      return _BlockRow(
+                        key: ValueKey(block.id),
+                        block: block,
+                        controller: _controllerForBlock(block),
+                        focusNode: _focusForBlock(block),
+                        textColor: _toneColor(context, block.tone),
+                        onChanged: (value) async {
+                          if (value == '/' && block.text.isEmpty) {
+                            await _handleSlash(block);
+                            return;
+                          }
+                          await _updateBlockText(block, value);
+                        },
+                        onToggleTodo: (value) => _toggleTodo(block, value),
+                        onDelete: () => _deleteBlock(block),
+                        onSlashCommand: () => _handleSlash(block),
+                        onInsertBelow: () => _addBlock(at: index + 1),
+                        onChangeType: (type) => _changeBlockType(block, type),
+                        onChangeTone: (tone) => _changeBlockTone(block, tone),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
+  }
+
+  String _pageToMarkdown(NotePage page) {
+    final lines = <String>[];
+    for (final block in page.blocks) {
+      final t = block.text;
+      switch (block.type) {
+        case BlockType.heading:
+          lines.add('# $t');
+          break;
+        case BlockType.todo:
+          lines.add('- [${block.checked ? 'x' : ' '}] $t');
+          break;
+        case BlockType.code:
+          lines.add('```');
+          lines.add(t);
+          lines.add('```');
+          break;
+        case BlockType.paragraph:
+          lines.add(t);
+          break;
+      }
+      lines.add('');
+    }
+    return lines.join('\n').trim();
+  }
+
+  Color _toneColor(BuildContext context, BlockTone tone) {
+    final scheme = Theme.of(context).colorScheme;
+    return switch (tone) {
+      BlockTone.red => Colors.red.shade700,
+      BlockTone.orange => Colors.orange.shade800,
+      BlockTone.green => Colors.green.shade700,
+      BlockTone.blue => Colors.blue.shade700,
+      BlockTone.purple => Colors.purple.shade700,
+      BlockTone.normal => scheme.onSurface,
+    };
   }
 
   String _formatTime(DateTime time) {
@@ -1096,6 +1210,9 @@ class _BlockRow extends StatelessWidget {
     required this.onDelete,
     required this.onSlashCommand,
     required this.onInsertBelow,
+    required this.onChangeType,
+    required this.onChangeTone,
+    required this.textColor,
   });
 
   final NoteBlock block;
@@ -1106,13 +1223,22 @@ class _BlockRow extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onSlashCommand;
   final VoidCallback onInsertBelow;
+  final ValueChanged<BlockType> onChangeType;
+  final ValueChanged<BlockTone> onChangeTone;
+  final Color textColor;
 
   @override
   Widget build(BuildContext context) {
-    final textStyle = switch (block.type) {
+    final baseStyle = switch (block.type) {
       BlockType.heading => Theme.of(context).textTheme.headlineSmall,
+      BlockType.code => Theme.of(
+        context,
+      ).textTheme.bodyMedium?.copyWith(fontFamily: 'monospace'),
       _ => Theme.of(context).textTheme.bodyLarge,
     };
+    final textStyle = (baseStyle ?? const TextStyle()).copyWith(
+      color: textColor,
+    );
 
     return Padding(
       key: key,
@@ -1139,17 +1265,28 @@ class _BlockRow extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: TextField(
-              controller: controller,
-              focusNode: focusNode,
-              style: textStyle,
-              onChanged: onChanged,
-              minLines: 1,
-              maxLines: null,
-              decoration: InputDecoration(
-                hintText: _hint(block.type),
-                border: InputBorder.none,
-                isDense: true,
+            child: Container(
+              padding: block.type == BlockType.code
+                  ? const EdgeInsets.symmetric(horizontal: 10, vertical: 8)
+                  : EdgeInsets.zero,
+              decoration: block.type == BlockType.code
+                  ? BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
+                    )
+                  : null,
+              child: TextField(
+                controller: controller,
+                focusNode: focusNode,
+                style: textStyle,
+                onChanged: onChanged,
+                minLines: 1,
+                maxLines: null,
+                decoration: InputDecoration(
+                  hintText: _hint(block.type),
+                  border: InputBorder.none,
+                  isDense: true,
+                ),
               ),
             ),
           ),
@@ -1157,9 +1294,35 @@ class _BlockRow extends StatelessWidget {
             tooltip: 'Block menu',
             onSelected: (value) {
               switch (value) {
-                case 'paragraph':
-                  onChanged(controller.text);
-                  onSlashCommand();
+                case 'type:paragraph':
+                  onChangeType(BlockType.paragraph);
+                  break;
+                case 'type:heading':
+                  onChangeType(BlockType.heading);
+                  break;
+                case 'type:todo':
+                  onChangeType(BlockType.todo);
+                  break;
+                case 'type:code':
+                  onChangeType(BlockType.code);
+                  break;
+                case 'tone:normal':
+                  onChangeTone(BlockTone.normal);
+                  break;
+                case 'tone:red':
+                  onChangeTone(BlockTone.red);
+                  break;
+                case 'tone:orange':
+                  onChangeTone(BlockTone.orange);
+                  break;
+                case 'tone:green':
+                  onChangeTone(BlockTone.green);
+                  break;
+                case 'tone:blue':
+                  onChangeTone(BlockTone.blue);
+                  break;
+                case 'tone:purple':
+                  onChangeTone(BlockTone.purple);
                   break;
                 case 'insert':
                   onInsertBelow();
@@ -1170,6 +1333,45 @@ class _BlockRow extends StatelessWidget {
               }
             },
             itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'type:paragraph',
+                child: Text('Type: Paragraph'),
+              ),
+              const PopupMenuItem(
+                value: 'type:heading',
+                child: Text('Type: Heading'),
+              ),
+              const PopupMenuItem(
+                value: 'type:todo',
+                child: Text('Type: Todo'),
+              ),
+              const PopupMenuItem(
+                value: 'type:code',
+                child: Text('Type: Code'),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'tone:normal',
+                child: Text('Color: Default'),
+              ),
+              const PopupMenuItem(value: 'tone:red', child: Text('Color: Red')),
+              const PopupMenuItem(
+                value: 'tone:orange',
+                child: Text('Color: Orange'),
+              ),
+              const PopupMenuItem(
+                value: 'tone:green',
+                child: Text('Color: Green'),
+              ),
+              const PopupMenuItem(
+                value: 'tone:blue',
+                child: Text('Color: Blue'),
+              ),
+              const PopupMenuItem(
+                value: 'tone:purple',
+                child: Text('Color: Purple'),
+              ),
+              const PopupMenuDivider(),
               const PopupMenuItem(value: 'insert', child: Text('Insert below')),
               const PopupMenuItem(value: 'delete', child: Text('Delete block')),
             ],
@@ -1184,6 +1386,7 @@ class _BlockRow extends StatelessWidget {
     return switch (type) {
       BlockType.heading => 'Heading',
       BlockType.todo => 'Todo item',
+      BlockType.code => 'Code block',
       BlockType.paragraph => 'Type "/" for commands',
     };
   }
