@@ -25,38 +25,111 @@ class NotesApp extends StatelessWidget {
   }
 }
 
+enum BlockType { paragraph, heading, todo }
+
+class NoteBlock {
+  NoteBlock({
+    required this.id,
+    required this.type,
+    required this.text,
+    this.checked = false,
+  });
+
+  final String id;
+  BlockType type;
+  String text;
+  bool checked;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'type': type.name,
+    'text': text,
+    'checked': checked,
+  };
+
+  static NoteBlock fromJson(Map<String, dynamic> json) {
+    final typeStr = json['type'] as String? ?? 'paragraph';
+    final type = BlockType.values.firstWhere(
+      (item) => item.name == typeStr,
+      orElse: () => BlockType.paragraph,
+    );
+    return NoteBlock(
+      id:
+          json['id'] as String? ??
+          DateTime.now().microsecondsSinceEpoch.toString(),
+      type: type,
+      text: json['text'] as String? ?? '',
+      checked: json['checked'] as bool? ?? false,
+    );
+  }
+}
+
 class NotePage {
   NotePage({
     required this.id,
     required this.title,
-    required this.content,
     required this.updatedAt,
     required this.isFavorite,
+    required this.blocks,
   });
 
   final String id;
   String title;
-  String content;
   DateTime updatedAt;
   bool isFavorite;
+  List<NoteBlock> blocks;
+
+  String get searchText => blocks.map((b) => b.text).join('\n');
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
-    'content': content,
     'updatedAt': updatedAt.toIso8601String(),
     'isFavorite': isFavorite,
+    'blocks': blocks.map((b) => b.toJson()).toList(),
   };
 
   static NotePage fromJson(Map<String, dynamic> json) {
+    final rawBlocks = json['blocks'] as List<dynamic>?;
+    List<NoteBlock> blocks;
+
+    if (rawBlocks != null && rawBlocks.isNotEmpty) {
+      blocks = rawBlocks
+          .map((item) => NoteBlock.fromJson(item as Map<String, dynamic>))
+          .toList();
+    } else {
+      final oldContent = json['content'] as String? ?? '';
+      final lines = oldContent.split('\n');
+      blocks = lines
+          .map(
+            (line) => NoteBlock(
+              id: '${DateTime.now().microsecondsSinceEpoch}-${line.hashCode}',
+              type: BlockType.paragraph,
+              text: line,
+            ),
+          )
+          .toList();
+      if (blocks.isEmpty) {
+        blocks = [_defaultBlock()];
+      }
+    }
+
     return NotePage(
       id: json['id'] as String,
       title: json['title'] as String? ?? 'Untitled',
-      content: json['content'] as String? ?? '',
       updatedAt:
           DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
           DateTime.now(),
       isFavorite: json['isFavorite'] as bool? ?? false,
+      blocks: blocks,
+    );
+  }
+
+  static NoteBlock _defaultBlock() {
+    return NoteBlock(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      type: BlockType.paragraph,
+      text: '',
     );
   }
 }
@@ -69,18 +142,19 @@ class NotesHomePage extends StatefulWidget {
 }
 
 class _NotesHomePageState extends State<NotesHomePage> {
-  static const _storageKey = 'notion_lite_local_pages_v3';
+  static const _storageKey = 'notion_lite_local_pages_v4';
 
   final _titleController = TextEditingController();
-  final _contentController = TextEditingController();
   final _searchController = TextEditingController();
   final List<NotePage> _pages = [];
 
   String? _selectedPageId;
   bool _isLoading = true;
-  bool _isHydratingEditor = false;
-  bool _isPreviewMode = false;
+  bool _isHydratingTitle = false;
   int _mobileTabIndex = 0;
+
+  final Map<String, TextEditingController> _blockControllers = {};
+  final Map<String, FocusNode> _blockFocusNodes = {};
 
   NotePage? get _selectedPage {
     if (_pages.isEmpty) {
@@ -97,7 +171,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
         return true;
       }
       return p.title.toLowerCase().contains(q) ||
-          p.content.toLowerCase().contains(q);
+          p.searchText.toLowerCase().contains(q);
     }).toList();
 
     filtered.sort((a, b) {
@@ -112,8 +186,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
   @override
   void initState() {
     super.initState();
-    _titleController.addListener(_onEditorChanged);
-    _contentController.addListener(_onEditorChanged);
+    _titleController.addListener(_onTitleChanged);
     _searchController.addListener(_onSearchChanged);
     _loadPages();
   }
@@ -121,8 +194,13 @@ class _NotesHomePageState extends State<NotesHomePage> {
   @override
   void dispose() {
     _titleController.dispose();
-    _contentController.dispose();
     _searchController.dispose();
+    for (final c in _blockControllers.values) {
+      c.dispose();
+    }
+    for (final n in _blockFocusNodes.values) {
+      n.dispose();
+    }
     super.dispose();
   }
 
@@ -135,10 +213,25 @@ class _NotesHomePageState extends State<NotesHomePage> {
         NotePage(
           id: DateTime.now().microsecondsSinceEpoch.toString(),
           title: 'Welcome',
-          content:
-              '# Local Note\n\nThis version is fully local and offline-first.',
           updatedAt: DateTime.now(),
           isFavorite: true,
+          blocks: [
+            NoteBlock(
+              id: '${DateTime.now().microsecondsSinceEpoch}-1',
+              type: BlockType.heading,
+              text: 'Notion-style Blocks',
+            ),
+            NoteBlock(
+              id: '${DateTime.now().microsecondsSinceEpoch}-2',
+              type: BlockType.paragraph,
+              text: 'Type / in an empty block to open block commands.',
+            ),
+            NoteBlock(
+              id: '${DateTime.now().microsecondsSinceEpoch}-3',
+              type: BlockType.todo,
+              text: 'Try drag-and-drop reorder',
+            ),
+          ],
         ),
       );
       await _savePages();
@@ -174,10 +267,9 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
   void _syncEditorFromSelected() {
     final page = _selectedPage;
-    _isHydratingEditor = true;
+    _isHydratingTitle = true;
     _titleController.text = page?.title ?? '';
-    _contentController.text = page?.content ?? '';
-    _isHydratingEditor = false;
+    _isHydratingTitle = false;
   }
 
   void _onSearchChanged() {
@@ -201,8 +293,8 @@ class _NotesHomePageState extends State<NotesHomePage> {
     setState(() {});
   }
 
-  void _onEditorChanged() {
-    if (_isHydratingEditor) {
+  void _onTitleChanged() {
+    if (_isHydratingTitle) {
       return;
     }
     final page = _selectedPage;
@@ -215,7 +307,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
         : _titleController.text.trim();
     setState(() {
       page.title = nextTitle;
-      page.content = _contentController.text;
       page.updatedAt = DateTime.now();
       _selectedPageId = page.id;
     });
@@ -226,9 +317,15 @@ class _NotesHomePageState extends State<NotesHomePage> {
     final page = NotePage(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       title: 'Untitled',
-      content: '',
       updatedAt: DateTime.now(),
       isFavorite: false,
+      blocks: [
+        NoteBlock(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          type: BlockType.paragraph,
+          text: '',
+        ),
+      ],
     );
 
     setState(() {
@@ -248,6 +345,8 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return;
     }
 
+    _disposePageControllers(page);
+
     setState(() {
       _pages.removeWhere((p) => p.id == page.id);
       _selectedPageId = _visiblePages.firstOrNull?.id;
@@ -255,6 +354,13 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
     _syncEditorFromSelected();
     await _savePages();
+  }
+
+  void _disposePageControllers(NotePage page) {
+    for (final block in page.blocks) {
+      _blockControllers.remove(block.id)?.dispose();
+      _blockFocusNodes.remove(block.id)?.dispose();
+    }
   }
 
   Future<void> _toggleFavorite() async {
@@ -266,9 +372,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
     setState(() {
       page.isFavorite = !page.isFavorite;
       page.updatedAt = DateTime.now();
-      _selectedPageId = page.id;
     });
-
     await _savePages();
   }
 
@@ -335,6 +439,15 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return;
     }
 
+    for (final c in _blockControllers.values) {
+      c.dispose();
+    }
+    _blockControllers.clear();
+    for (final n in _blockFocusNodes.values) {
+      n.dispose();
+    }
+    _blockFocusNodes.clear();
+
     setState(() {
       _pages
         ..clear()
@@ -352,17 +465,171 @@ class _NotesHomePageState extends State<NotesHomePage> {
     );
   }
 
-  void _insertAtCursor(String text) {
-    final value = _contentController.value;
-    final selection = value.selection;
-    final start = selection.start < 0 ? value.text.length : selection.start;
-    final end = selection.end < 0 ? value.text.length : selection.end;
+  TextEditingController _controllerForBlock(NoteBlock block) {
+    final existing = _blockControllers[block.id];
+    if (existing != null) {
+      if (existing.text != block.text) {
+        existing.value = TextEditingValue(
+          text: block.text,
+          selection: TextSelection.collapsed(offset: block.text.length),
+        );
+      }
+      return existing;
+    }
 
-    final newText = value.text.replaceRange(start, end, text);
-    _contentController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: start + text.length),
+    final controller = TextEditingController(text: block.text);
+    _blockControllers[block.id] = controller;
+    return controller;
+  }
+
+  FocusNode _focusForBlock(NoteBlock block) {
+    final existing = _blockFocusNodes[block.id];
+    if (existing != null) {
+      return existing;
+    }
+    final node = FocusNode();
+    _blockFocusNodes[block.id] = node;
+    return node;
+  }
+
+  Future<void> _updateBlockText(NoteBlock block, String text) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+
+    setState(() {
+      block.text = text;
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+  }
+
+  Future<void> _toggleTodo(NoteBlock block, bool checked) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+
+    setState(() {
+      block.checked = checked;
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+  }
+
+  Future<void> _addBlock({
+    BlockType type = BlockType.paragraph,
+    int? at,
+  }) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+
+    final newBlock = NoteBlock(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      type: type,
+      text: '',
+      checked: false,
     );
+
+    setState(() {
+      final index = at ?? page.blocks.length;
+      page.blocks.insert(index.clamp(0, page.blocks.length), newBlock);
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusForBlock(newBlock).requestFocus();
+    });
+  }
+
+  Future<void> _deleteBlock(NoteBlock block) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+    if (page.blocks.length == 1) {
+      await _updateBlockText(block, '');
+      return;
+    }
+
+    setState(() {
+      page.blocks.removeWhere((b) => b.id == block.id);
+      page.updatedAt = DateTime.now();
+    });
+
+    _blockControllers.remove(block.id)?.dispose();
+    _blockFocusNodes.remove(block.id)?.dispose();
+    await _savePages();
+  }
+
+  Future<void> _changeBlockType(NoteBlock block, BlockType type) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+
+    setState(() {
+      block.type = type;
+      if (type != BlockType.todo) {
+        block.checked = false;
+      }
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+  }
+
+  Future<void> _reorderBlocks(int oldIndex, int newIndex) async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+    setState(() {
+      if (newIndex > oldIndex) {
+        newIndex -= 1;
+      }
+      final block = page.blocks.removeAt(oldIndex);
+      page.blocks.insert(newIndex, block);
+      page.updatedAt = DateTime.now();
+    });
+    await _savePages();
+  }
+
+  Future<void> _handleSlash(NoteBlock block) async {
+    final result = await showModalBottomSheet<BlockType>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.subject),
+                title: const Text('Paragraph'),
+                onTap: () => Navigator.pop(context, BlockType.paragraph),
+              ),
+              ListTile(
+                leading: const Icon(Icons.title),
+                title: const Text('Heading'),
+                onTap: () => Navigator.pop(context, BlockType.heading),
+              ),
+              ListTile(
+                leading: const Icon(Icons.check_box_outlined),
+                title: const Text('Todo'),
+                onTap: () => Navigator.pop(context, BlockType.todo),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (result != null) {
+      await _changeBlockType(block, result);
+    }
   }
 
   @override
@@ -384,7 +651,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
   Widget _buildMobileLayout(BuildContext context) {
     final selected = _selectedPage;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Notion Lite Local'),
@@ -409,6 +675,13 @@ class _NotesHomePageState extends State<NotesHomePage> {
       body: _mobileTabIndex == 0
           ? _buildPagesPane(compact: true)
           : _buildEditorPane(selected, compact: true),
+      floatingActionButton: _mobileTabIndex == 1
+          ? FloatingActionButton.extended(
+              onPressed: () => _addBlock(),
+              icon: const Icon(Icons.add),
+              label: const Text('Block'),
+            )
+          : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _mobileTabIndex,
         onDestinationSelected: (index) {
@@ -438,19 +711,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
         title: const Text('Notion Lite Local'),
         actions: [
           IconButton(
-            tooltip: 'Preview',
-            onPressed: () {
-              setState(() {
-                _isPreviewMode = !_isPreviewMode;
-              });
-            },
-            icon: Icon(
-              _isPreviewMode
-                  ? Icons.edit_note_outlined
-                  : Icons.preview_outlined,
-            ),
-          ),
-          IconButton(
             tooltip: 'Backup JSON',
             onPressed: _copyAllAsJson,
             icon: const Icon(Icons.upload_file_outlined),
@@ -477,6 +737,11 @@ class _NotesHomePageState extends State<NotesHomePage> {
           SizedBox(width: 320, child: _buildPagesPane(compact: false)),
           Expanded(child: _buildEditorPane(selected, compact: false)),
         ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _addBlock(),
+        icon: const Icon(Icons.add),
+        label: const Text('New Block'),
       ),
     );
   }
@@ -624,52 +889,37 @@ class _NotesHomePageState extends State<NotesHomePage> {
                 ),
             ],
           ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              ActionChip(
-                label: const Text('Preview'),
-                onPressed: () {
-                  setState(() {
-                    _isPreviewMode = !_isPreviewMode;
-                  });
-                },
-              ),
-              ActionChip(
-                label: const Text('H1'),
-                onPressed: () => _insertAtCursor('\n# Heading\n'),
-              ),
-              ActionChip(
-                label: const Text('H2'),
-                onPressed: () => _insertAtCursor('\n## Subheading\n'),
-              ),
-              ActionChip(
-                label: const Text('Todo'),
-                onPressed: () => _insertAtCursor('\n- [ ] Task\n'),
-              ),
-              ActionChip(
-                label: const Text('Code'),
-                onPressed: () => _insertAtCursor('\n```\ncode\n```\n'),
-              ),
-            ],
+          const SizedBox(height: 8),
+          Text(
+            'Type / in an empty block for commands',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 8),
           Expanded(
-            child: _isPreviewMode
-                ? _MarkdownPreview(content: _contentController.text)
-                : TextField(
-                    controller: _contentController,
-                    expands: true,
-                    maxLines: null,
-                    minLines: null,
-                    keyboardType: TextInputType.multiline,
-                    textAlignVertical: TextAlignVertical.top,
-                    decoration: const InputDecoration(
-                      hintText: 'Write your local notes here...',
-                      border: InputBorder.none,
-                    ),
-                  ),
+            child: ReorderableListView.builder(
+              onReorder: _reorderBlocks,
+              itemCount: selected.blocks.length,
+              itemBuilder: (context, index) {
+                final block = selected.blocks[index];
+                return _BlockRow(
+                  key: ValueKey(block.id),
+                  block: block,
+                  controller: _controllerForBlock(block),
+                  focusNode: _focusForBlock(block),
+                  onChanged: (value) async {
+                    if (value == '/' && block.text.isEmpty) {
+                      await _handleSlash(block);
+                      return;
+                    }
+                    await _updateBlockText(block, value);
+                  },
+                  onToggleTodo: (value) => _toggleTodo(block, value),
+                  onDelete: () => _deleteBlock(block),
+                  onSlashCommand: () => _handleSlash(block),
+                  onInsertBelow: () => _addBlock(at: index + 1),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -687,75 +937,107 @@ class _NotesHomePageState extends State<NotesHomePage> {
   }
 }
 
-class _MarkdownPreview extends StatelessWidget {
-  const _MarkdownPreview({required this.content});
+class _BlockRow extends StatelessWidget {
+  const _BlockRow({
+    super.key,
+    required this.block,
+    required this.controller,
+    required this.focusNode,
+    required this.onChanged,
+    required this.onToggleTodo,
+    required this.onDelete,
+    required this.onSlashCommand,
+    required this.onInsertBelow,
+  });
 
-  final String content;
+  final NoteBlock block;
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<bool> onToggleTodo;
+  final VoidCallback onDelete;
+  final VoidCallback onSlashCommand;
+  final VoidCallback onInsertBelow;
 
   @override
   Widget build(BuildContext context) {
-    final lines = content.split('\n');
-    return ListView.separated(
-      itemCount: lines.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 6),
-      itemBuilder: (context, index) {
-        final line = lines[index];
+    final textStyle = switch (block.type) {
+      BlockType.heading => Theme.of(context).textTheme.headlineSmall,
+      _ => Theme.of(context).textTheme.bodyLarge,
+    };
 
-        if (line.startsWith('### ')) {
-          return Text(
-            line.substring(4),
-            style: Theme.of(context).textTheme.titleMedium,
-          );
-        }
-        if (line.startsWith('## ')) {
-          return Text(
-            line.substring(3),
-            style: Theme.of(context).textTheme.headlineSmall,
-          );
-        }
-        if (line.startsWith('# ')) {
-          return Text(
-            line.substring(2),
-            style: Theme.of(context).textTheme.headlineMedium,
-          );
-        }
-        if (line.startsWith('- [ ] ')) {
-          return Row(
-            children: [
-              const Icon(Icons.check_box_outline_blank, size: 18),
-              const SizedBox(width: 8),
-              Expanded(child: Text(line.substring(6))),
-            ],
-          );
-        }
-        if (line.startsWith('- [x] ') || line.startsWith('- [X] ')) {
-          return Row(
-            children: [
-              const Icon(Icons.check_box, size: 18),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  line.substring(6),
-                  style: const TextStyle(
-                    decoration: TextDecoration.lineThrough,
+    return Padding(
+      key: key,
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 36,
+            child: Row(
+              children: [
+                if (block.type == BlockType.todo)
+                  Checkbox(
+                    value: block.checked,
+                    onChanged: (value) => onToggleTodo(value ?? false),
+                  )
+                else
+                  IconButton(
+                    tooltip: 'Slash command',
+                    onPressed: onSlashCommand,
+                    icon: const Icon(Icons.add_circle_outline, size: 20),
                   ),
-                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              style: textStyle,
+              onChanged: onChanged,
+              minLines: 1,
+              maxLines: null,
+              decoration: InputDecoration(
+                hintText: _hint(block.type),
+                border: InputBorder.none,
+                isDense: true,
               ),
+            ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Block menu',
+            onSelected: (value) {
+              switch (value) {
+                case 'paragraph':
+                  onChanged(controller.text);
+                  onSlashCommand();
+                  break;
+                case 'insert':
+                  onInsertBelow();
+                  break;
+                case 'delete':
+                  onDelete();
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(value: 'insert', child: Text('Insert below')),
+              const PopupMenuItem(value: 'delete', child: Text('Delete block')),
             ],
-          );
-        }
-        if (line.startsWith('- ')) {
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('• '),
-              Expanded(child: Text(line.substring(2))),
-            ],
-          );
-        }
-        return Text(line);
-      },
+            icon: const Icon(Icons.drag_indicator),
+          ),
+        ],
+      ),
     );
+  }
+
+  static String _hint(BlockType type) {
+    return switch (type) {
+      BlockType.heading => 'Heading',
+      BlockType.todo => 'Todo item',
+      BlockType.paragraph => 'Type "/" for commands',
+    };
   }
 }
 

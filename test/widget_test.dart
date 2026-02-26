@@ -9,6 +9,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.text('Pages'), findsOneWidget);
+    expect(find.text('Notion Lite Local'), findsOneWidget);
+    expect(find.text('Pages'), findsWidgets);
   });
 }
