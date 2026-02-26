@@ -1,8 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -800,6 +804,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
       appBar: AppBar(
         title: const Text('Notion Lite Local'),
         actions: [
+          PopupMenuButton<String>(
+            tooltip: 'Export notes',
+            onSelected: (value) {
+              if (value == 'md') {
+                _exportCurrentPageMarkdown();
+              } else if (value == 'json') {
+                _exportAllPagesJson();
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'md', child: Text('Export current as Markdown')),
+              PopupMenuItem(value: 'json', child: Text('Export all as JSON')),
+            ],
+            icon: const Icon(Icons.ios_share_outlined),
+          ),
           IconButton(
             tooltip: _isMarkdownPreview ? 'Edit mode' : 'Markdown preview',
             onPressed: () {
@@ -873,6 +892,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
       appBar: AppBar(
         title: const Text('Notion Lite Local'),
         actions: [
+          PopupMenuButton<String>(
+            tooltip: 'Export notes',
+            onSelected: (value) {
+              if (value == 'md') {
+                _exportCurrentPageMarkdown();
+              } else if (value == 'json') {
+                _exportAllPagesJson();
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'md', child: Text('Export current as Markdown')),
+              PopupMenuItem(value: 'json', child: Text('Export all as JSON')),
+            ],
+            icon: const Icon(Icons.ios_share_outlined),
+          ),
           IconButton(
             tooltip: _isMarkdownPreview ? 'Edit mode' : 'Markdown preview',
             onPressed: () {
@@ -1186,6 +1220,84 @@ class _NotesHomePageState extends State<NotesHomePage> {
       BlockTone.purple => Colors.purple.shade700,
       BlockTone.normal => scheme.onSurface,
     };
+  }
+
+  Future<void> _exportCurrentPageMarkdown() async {
+    final page = _selectedPage;
+    if (page == null) {
+      return;
+    }
+    final md = '# ${page.title}\n\n${_pageToMarkdown(page)}\n';
+    await _shareExportContent(
+      content: md,
+      fileName: '${_safeFileName(page.title)}.md',
+      mimeType: 'text/markdown',
+      successMessage: 'Markdown exported',
+      webFallbackMessage: 'Markdown copied to clipboard',
+    );
+  }
+
+  Future<void> _exportAllPagesJson() async {
+    final jsonData = const JsonEncoder.withIndent('  ').convert(
+      _pages.map((p) => p.toJson()).toList(),
+    );
+    await _shareExportContent(
+      content: jsonData,
+      fileName: 'notion-lite-export-${DateTime.now().millisecondsSinceEpoch}.json',
+      mimeType: 'application/json',
+      successMessage: 'JSON exported',
+      webFallbackMessage: 'JSON copied to clipboard',
+    );
+  }
+
+  Future<void> _shareExportContent({
+    required String content,
+    required String fileName,
+    required String mimeType,
+    required String successMessage,
+    required String webFallbackMessage,
+  }) async {
+    try {
+      if (kIsWeb) {
+        await Clipboard.setData(ClipboardData(text: content));
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(webFallbackMessage)),
+        );
+        return;
+      }
+
+      final tempDir = await getTemporaryDirectory();
+      final filePath = '${tempDir.path}/$fileName';
+      final file = File(filePath);
+      await file.writeAsString(content);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: mimeType)],
+        text: 'Exported from Notion Lite Local',
+      );
+
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(successMessage)),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Export failed: $e')),
+      );
+    }
+  }
+
+  String _safeFileName(String raw) {
+    final normalized = raw.trim().isEmpty ? 'untitled' : raw.trim();
+    return normalized.replaceAll(RegExp(r'[\\\\/:*?"<>|\\s]+'), '-');
   }
 
   String _formatTime(DateTime time) {
