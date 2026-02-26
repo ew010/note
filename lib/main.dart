@@ -71,6 +71,7 @@ class NotePage {
     required this.updatedAt,
     required this.isFavorite,
     required this.blocks,
+    this.parentId,
   });
 
   final String id;
@@ -78,6 +79,7 @@ class NotePage {
   DateTime updatedAt;
   bool isFavorite;
   List<NoteBlock> blocks;
+  String? parentId;
 
   String get searchText => blocks.map((b) => b.text).join('\n');
 
@@ -87,6 +89,7 @@ class NotePage {
     'updatedAt': updatedAt.toIso8601String(),
     'isFavorite': isFavorite,
     'blocks': blocks.map((b) => b.toJson()).toList(),
+    'parentId': parentId,
   };
 
   static NotePage fromJson(Map<String, dynamic> json) {
@@ -122,6 +125,7 @@ class NotePage {
           DateTime.now(),
       isFavorite: json['isFavorite'] as bool? ?? false,
       blocks: blocks,
+      parentId: json['parentId'] as String?,
     );
   }
 
@@ -132,6 +136,13 @@ class NotePage {
       text: '',
     );
   }
+}
+
+class _PageNode {
+  const _PageNode({required this.page, required this.depth});
+
+  final NotePage page;
+  final int depth;
 }
 
 class NotesHomePage extends StatefulWidget {
@@ -161,26 +172,87 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return null;
     }
     final current = _pages.where((p) => p.id == _selectedPageId).firstOrNull;
-    return current ?? _visiblePages.firstOrNull;
+    return current ?? _visiblePageNodes.firstOrNull?.page;
   }
 
-  List<NotePage> get _visiblePages {
+  List<_PageNode> get _visiblePageNodes {
     final q = _searchController.text.trim().toLowerCase();
-    final filtered = _pages.where((p) {
-      if (q.isEmpty) {
-        return true;
-      }
-      return p.title.toLowerCase().contains(q) ||
-          p.searchText.toLowerCase().contains(q);
-    }).toList();
+    if (q.isNotEmpty) {
+      final filtered = _pages.where((p) {
+        return p.title.toLowerCase().contains(q) ||
+            p.searchText.toLowerCase().contains(q);
+      }).toList();
+      filtered.sort(_pageSort);
+      return filtered
+          .map((page) => _PageNode(page: page, depth: _depthOf(page)))
+          .toList();
+    }
 
-    filtered.sort((a, b) {
-      if (a.isFavorite != b.isFavorite) {
-        return a.isFavorite ? -1 : 1;
+    final childrenByParent = <String?, List<NotePage>>{};
+    for (final page in _pages) {
+      final parent = _pages.any((p) => p.id == page.parentId)
+          ? page.parentId
+          : null;
+      childrenByParent.putIfAbsent(parent, () => []).add(page);
+    }
+
+    final roots = childrenByParent[null] ?? <NotePage>[];
+    roots.sort(_pageSort);
+
+    final nodes = <_PageNode>[];
+    void walk(NotePage page, int depth) {
+      nodes.add(_PageNode(page: page, depth: depth));
+      final children = childrenByParent[page.id] ?? <NotePage>[];
+      children.sort(_pageSort);
+      for (final child in children) {
+        walk(child, depth + 1);
       }
-      return b.updatedAt.compareTo(a.updatedAt);
-    });
-    return filtered;
+    }
+
+    for (final root in roots) {
+      walk(root, 0);
+    }
+    return nodes;
+  }
+
+  int _depthOf(NotePage page) {
+    var depth = 0;
+    var current = page;
+    final seen = <String>{page.id};
+    while (current.parentId != null) {
+      final parent = _pages.where((p) => p.id == current.parentId).firstOrNull;
+      if (parent == null || seen.contains(parent.id)) {
+        break;
+      }
+      depth += 1;
+      seen.add(parent.id);
+      current = parent;
+    }
+    return depth;
+  }
+
+  int _pageSort(NotePage a, NotePage b) {
+    if (a.isFavorite != b.isFavorite) {
+      return a.isFavorite ? -1 : 1;
+    }
+    return b.updatedAt.compareTo(a.updatedAt);
+  }
+
+  List<String> _collectSubtreeIds(String pageId) {
+    final result = <String>{pageId};
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (final p in _pages) {
+        if (!result.contains(p.id) &&
+            p.parentId != null &&
+            result.contains(p.parentId)) {
+          result.add(p.id);
+          changed = true;
+        }
+      }
+    }
+    return result.toList();
   }
 
   @override
@@ -252,7 +324,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
     setState(() {
       _isLoading = false;
-      _selectedPageId = _visiblePages.firstOrNull?.id;
+      _selectedPageId = _visiblePageNodes.firstOrNull?.page.id;
     });
     _syncEditorFromSelected();
   }
@@ -273,7 +345,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
   }
 
   void _onSearchChanged() {
-    final visible = _visiblePages;
+    final visible = _visiblePageNodes;
     if (visible.isEmpty) {
       setState(() {
         _selectedPageId = null;
@@ -282,9 +354,9 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return;
     }
 
-    if (!visible.any((p) => p.id == _selectedPageId)) {
+    if (!visible.any((n) => n.page.id == _selectedPageId)) {
       setState(() {
-        _selectedPageId = visible.first.id;
+        _selectedPageId = visible.first.page.id;
       });
       _syncEditorFromSelected();
       return;
@@ -326,10 +398,44 @@ class _NotesHomePageState extends State<NotesHomePage> {
           text: '',
         ),
       ],
+      parentId: null,
     );
 
     setState(() {
       _pages.insert(0, page);
+      _selectedPageId = page.id;
+      _searchController.clear();
+      _mobileTabIndex = 1;
+    });
+
+    _syncEditorFromSelected();
+    await _savePages();
+  }
+
+  Future<void> _createChildPage() async {
+    final parent = _selectedPage;
+    if (parent == null) {
+      await _createPage();
+      return;
+    }
+
+    final page = NotePage(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      title: 'Untitled',
+      updatedAt: DateTime.now(),
+      isFavorite: false,
+      parentId: parent.id,
+      blocks: [
+        NoteBlock(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          type: BlockType.paragraph,
+          text: '',
+        ),
+      ],
+    );
+
+    setState(() {
+      _pages.add(page);
       _selectedPageId = page.id;
       _searchController.clear();
       _mobileTabIndex = 1;
@@ -345,11 +451,17 @@ class _NotesHomePageState extends State<NotesHomePage> {
       return;
     }
 
-    _disposePageControllers(page);
+    final removingIds = _collectSubtreeIds(page.id);
+    if (removingIds.length == _pages.length) {
+      return;
+    }
+    for (final item in _pages.where((p) => removingIds.contains(p.id))) {
+      _disposePageControllers(item);
+    }
 
     setState(() {
-      _pages.removeWhere((p) => p.id == page.id);
-      _selectedPageId = _visiblePages.firstOrNull?.id;
+      _pages.removeWhere((p) => removingIds.contains(p.id));
+      _selectedPageId = _visiblePageNodes.firstOrNull?.page.id;
     });
 
     _syncEditorFromSelected();
@@ -452,7 +564,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
       _pages
         ..clear()
         ..addAll(imported);
-      _selectedPageId = _visiblePages.firstOrNull?.id;
+      _selectedPageId = _visiblePageNodes.firstOrNull?.page.id;
     });
     _syncEditorFromSelected();
     await _savePages();
@@ -661,6 +773,11 @@ class _NotesHomePageState extends State<NotesHomePage> {
             icon: const Icon(Icons.note_add_outlined),
           ),
           IconButton(
+            tooltip: 'New subpage',
+            onPressed: _createChildPage,
+            icon: const Icon(Icons.subdirectory_arrow_right),
+          ),
+          IconButton(
             tooltip: 'Backup JSON',
             onPressed: _copyAllAsJson,
             icon: const Icon(Icons.upload_file_outlined),
@@ -726,6 +843,11 @@ class _NotesHomePageState extends State<NotesHomePage> {
             icon: const Icon(Icons.note_add_outlined),
           ),
           IconButton(
+            tooltip: 'New subpage',
+            onPressed: _createChildPage,
+            icon: const Icon(Icons.subdirectory_arrow_right),
+          ),
+          IconButton(
             tooltip: 'Delete page',
             onPressed: _pages.length > 1 ? _deleteSelectedPage : null,
             icon: const Icon(Icons.delete_outline),
@@ -778,6 +900,11 @@ class _NotesHomePageState extends State<NotesHomePage> {
                       onPressed: _createPage,
                       icon: const Icon(Icons.add),
                     ),
+                    IconButton(
+                      tooltip: 'Create subpage',
+                      onPressed: _createChildPage,
+                      icon: const Icon(Icons.call_split),
+                    ),
                   ],
                 ),
                 TextField(
@@ -794,25 +921,46 @@ class _NotesHomePageState extends State<NotesHomePage> {
           ),
           const Divider(height: 1),
           Expanded(
-            child: _visiblePages.isEmpty
+            child: _visiblePageNodes.isEmpty
                 ? const Center(child: Text('No matching pages'))
                 : ListView.builder(
-                    itemCount: _visiblePages.length,
+                    itemCount: _visiblePageNodes.length,
                     itemBuilder: (context, index) {
-                      final page = _visiblePages[index];
+                      final node = _visiblePageNodes[index];
+                      final page = node.page;
                       final isSelected = page.id == _selectedPageId;
                       return ListTile(
                         selected: isSelected,
-                        leading: Icon(
-                          page.isFavorite
-                              ? Icons.star_rounded
-                              : Icons.description_outlined,
-                          color: page.isFavorite ? Colors.amber.shade700 : null,
+                        leading: SizedBox(
+                          width: 14 + (node.depth * 14).toDouble(),
+                          child: node.depth > 0
+                              ? Icon(
+                                  Icons.subdirectory_arrow_right,
+                                  size: 14,
+                                  color: Theme.of(context).colorScheme.outline,
+                                )
+                              : const SizedBox.shrink(),
                         ),
-                        title: Text(
-                          page.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        title: Row(
+                          children: [
+                            Icon(
+                              page.isFavorite
+                                  ? Icons.star_rounded
+                                  : Icons.description_outlined,
+                              size: 16,
+                              color: page.isFavorite
+                                  ? Colors.amber.shade700
+                                  : null,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                page.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                         subtitle: Text(
                           _formatTime(page.updatedAt),
